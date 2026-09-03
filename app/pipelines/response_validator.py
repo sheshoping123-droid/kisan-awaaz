@@ -1,7 +1,13 @@
+import re
 from dataclasses import dataclass, field
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
+
+DOSAGE_PATTERN = re.compile(
+    r'\d+\.?\d*\s*(?:ml|ltr|liters?|grams?|kg|g\b|oz|tbsp|tsp|ppm|%|hectare)',
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -30,6 +36,7 @@ class ResponseValidator:
         response_text: str,
         rag_sources: list[str] | None = None,
         vision_confidence: str = "high",
+        rag_texts: list[str] | None = None,
     ) -> ValidationReport:
         report = ValidationReport()
 
@@ -45,10 +52,28 @@ class ResponseValidator:
             report.warnings.append("Low vision confidence — adding uncertainty framing")
             report.disclaimer = self.URDU_UNCERTAINTY_DISCLAIMER
 
+        if rag_texts is not None and rag_texts:
+            if self._has_ungrounded_dosage(response_text, rag_texts):
+                report.has_ungrounded_treatment = True
+                report.warnings.append("Response contains dosage not found in RAG texts")
+
         logger.info(
-            "Response validation: sources=%s, low_conf=%s, warnings=%d",
+            "Response validation: sources=%s, low_conf=%s, ungrounded=%s, warnings=%d",
             report.has_rag_source,
             report.low_confidence,
+            report.has_ungrounded_treatment,
             len(report.warnings),
         )
         return report
+
+    @staticmethod
+    def _has_ungrounded_dosage(response_text: str, rag_texts: list[str]) -> bool:
+        dosages = DOSAGE_PATTERN.findall(response_text)
+        if not dosages:
+            return False
+
+        rag_combined = " ".join(rag_texts)
+        for dosage in dosages:
+            if dosage.strip() not in rag_combined:
+                return True
+        return False

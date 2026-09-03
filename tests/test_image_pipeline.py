@@ -139,3 +139,68 @@ async def test_vision_failure_raises_pipeline_error():
     pipeline = ImagePipeline(vision_adapter=FailingVisionAdapter())
     with pytest.raises(PipelineError, match="Vision analysis failed"):
         await pipeline.process(JPEG_BYTES)
+
+
+# --- Phase 4: LLM integration tests ---
+
+from app.adapters.llm.base import LLMAdapter
+
+
+class FakeLLMAdapter(LLMAdapter):
+    def __init__(self, response: str = "گندم کی زنگ کے لیے منظور شدہ پھپھوند کش استعمال کریں۔"):
+        self._response = response
+        self.last_prompt = ""
+        self.last_context = ""
+
+    async def generate(self, prompt: str, context: str = "") -> str:
+        self.last_prompt = prompt
+        self.last_context = context
+        return self._response
+
+
+class FailingLLMAdapter(LLMAdapter):
+    async def generate(self, prompt: str, context: str = "") -> str:
+        raise RuntimeError("LLM service down")
+
+
+async def test_llm_adapter_produces_llm_response():
+    llm = FakeLLMAdapter(response="گندم کی بیماری کا مکمل علاج یہ ہے۔")
+
+    def retrieve(query, top_k=5):
+        return _make_rag_results(1)
+
+    pipeline = ImagePipeline(
+        vision_adapter=FakeVisionAdapter(),
+        rag_retrieve=retrieve,
+        llm_adapter=llm,
+    )
+    result = await pipeline.process(JPEG_BYTES)
+    assert "گندم کی بیماری کا مکمل علاج" in result.response_text
+    assert "wheat" in llm.last_prompt
+
+
+async def test_no_llm_adapter_uses_template():
+    pipeline = ImagePipeline(vision_adapter=FakeVisionAdapter())
+    result = await pipeline.process(JPEG_BYTES)
+    assert "فصل:" in result.response_text
+    assert "حالت:" in result.response_text
+
+
+async def test_llm_failure_falls_back_to_template():
+    pipeline = ImagePipeline(
+        vision_adapter=FakeVisionAdapter(),
+        llm_adapter=FailingLLMAdapter(),
+    )
+    result = await pipeline.process(JPEG_BYTES)
+    assert "فصل:" in result.response_text
+    assert "wheat" in result.response_text
+
+
+async def test_llm_response_with_no_rag_adds_disclaimer():
+    llm = FakeLLMAdapter(response="فصل کو صاف رکھیں۔")
+    pipeline = ImagePipeline(
+        vision_adapter=FakeVisionAdapter(),
+        llm_adapter=llm,
+    )
+    result = await pipeline.process(JPEG_BYTES)
+    assert "یقینی نہیں" in result.response_text

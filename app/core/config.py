@@ -21,6 +21,8 @@ class Settings(BaseSettings):
 
     # LLM
     llm_provider: str = Field(default="qwen_api")
+    llm_model: str = Field(default="qwen-max")
+    llm_timeout: int = Field(default=60)
     together_api_key: str = Field(default="")
     ollama_base_url: str = Field(default="http://localhost:11434")
     ollama_model: str = Field(default="qwen2.5:7b")

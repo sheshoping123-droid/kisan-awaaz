@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.adapters.whatsapp.base import WhatsAppAdapter, WhatsAppMessage
 from app.core.logging import get_logger
 from app.pipelines.image_pipeline import ImagePipeline
+from app.pipelines.text_pipeline import TextPipeline
 
 logger = get_logger(__name__)
 
@@ -18,9 +19,11 @@ class MessageRouter:
         self,
         image_pipeline: ImagePipeline | None = None,
         whatsapp_adapter: WhatsAppAdapter | None = None,
+        text_pipeline: TextPipeline | None = None,
     ):
         self._image_pipeline = image_pipeline
         self._whatsapp = whatsapp_adapter
+        self._text_pipeline = text_pipeline
 
     async def route(self, message: WhatsAppMessage) -> str:
         logger.info(
@@ -59,6 +62,15 @@ class MessageRouter:
         return "صوتی پیغامات کا جواب ابھی دستیاب نہیں ہے۔"
 
     async def _handle_text(self, message: WhatsAppMessage) -> str:
-        # Phase 2: TextPipeline
-        logger.info("MessageRouter: text handling not yet implemented")
-        return "ٹیکسٹ کا جواب ابھی دستیاب نہیں ہے۔"
+        if self._text_pipeline is None:
+            logger.info("MessageRouter: text pipeline not configured")
+            return "ٹیکسٹ کا جواب ابھی دستیاب نہیں ہے۔"
+
+        if not message.body or not message.body.strip():
+            return "براہ کرم اپنا سوال دوبارہ بھیجیں۔"
+
+        try:
+            return await self._text_pipeline.process(message.body)
+        except Exception as e:
+            logger.error("MessageRouter: text processing failed: %s", e)
+            return "معذرت، آپ کے سوال کا جواب نہیں دیا جا سکا۔ براہ کرم دوبارہ کوشش کریں۔"

@@ -111,3 +111,58 @@ async def test_image_routing_without_pipeline_returns_placeholder():
     )
     response = await router.route(msg)
     assert "دستیاب نہیں" in response
+
+
+# --- Phase 4: wired text pipeline tests ---
+
+from app.adapters.llm.base import LLMAdapter
+from app.pipelines.text_pipeline import TextPipeline
+
+
+class FakeTextLLMAdapter(LLMAdapter):
+    async def generate(self, prompt: str, context: str = "") -> str:
+        return "گندم کی زنگ کے لیے منظور شدہ پھپھوند کش استعمال کریں۔"
+
+
+class FailingTextPipeline(TextPipeline):
+    async def process(self, text: str, vision_context=None) -> str:
+        raise RuntimeError("pipeline error")
+
+
+@pytest.fixture
+def text_wired_router():
+    pipeline = TextPipeline(llm_adapter=FakeTextLLMAdapter())
+    return MessageRouter(text_pipeline=pipeline)
+
+
+@pytest.mark.asyncio
+async def test_text_routing_with_pipeline(text_wired_router):
+    msg = WhatsAppMessage(
+        from_number="+923001234567",
+        body="میری گندم کی فصل میں زنگ لگ رہی ہے",
+    )
+    response = await text_wired_router.route(msg)
+    assert "گندم" in response
+
+
+@pytest.mark.asyncio
+async def test_text_routing_without_pipeline_returns_placeholder():
+    router = MessageRouter()
+    msg = WhatsAppMessage(
+        from_number="+923001234567",
+        body="میری فصل میں بیماری ہے",
+    )
+    response = await router.route(msg)
+    assert "دستیاب نہیں" in response
+
+
+@pytest.mark.asyncio
+async def test_text_routing_pipeline_error_returns_graceful_message():
+    pipeline = FailingTextPipeline(llm_adapter=FakeTextLLMAdapter())
+    router = MessageRouter(text_pipeline=pipeline)
+    msg = WhatsAppMessage(
+        from_number="+923001234567",
+        body="میری فصل میں بیماری ہے",
+    )
+    response = await router.route(msg)
+    assert "معذرت" in response

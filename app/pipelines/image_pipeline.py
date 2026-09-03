@@ -5,10 +5,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from app.adapters.llm.base import LLMAdapter
 from app.adapters.vision.base import VisionAdapter, VisionResult
 from app.adapters.vision.image_validator import validate_image
 from app.core.errors import PipelineError
 from app.core.logging import get_logger
+from app.pipelines.response_validator import ResponseValidator
 from app.rag.models import RetrievalResult
 
 logger = get_logger(__name__)
@@ -28,6 +30,7 @@ class ImagePipeline:
     """Processes crop images through validation, vision analysis, and RAG retrieval.
 
     Flow: validate bytes -> vision model -> build query -> RAG retrieve -> format response
+    When an LLM adapter is provided, the response is LLM-generated; otherwise template-based.
     """
 
     URDU_UNCERTAINTY_DISCLAIMER = (
@@ -38,11 +41,15 @@ class ImagePipeline:
         self,
         vision_adapter: VisionAdapter,
         rag_retrieve: Callable[..., list[RetrievalResult]] | None = None,
+        llm_adapter: LLMAdapter | None = None,
+        validator: ResponseValidator | None = None,
         max_image_bytes: int = 10 * 1024 * 1024,
         rag_top_k: int = 5,
     ):
         self.vision = vision_adapter
         self._rag_retrieve = rag_retrieve
+        self._llm = llm_adapter
+        self._validator = validator or ResponseValidator()
         self._max_image_bytes = max_image_bytes
         self._rag_top_k = rag_top_k
 
@@ -80,7 +87,12 @@ class ImagePipeline:
             except Exception as e:
                 logger.warning("ImagePipeline: RAG retrieval failed: %s", e)
 
-        response_text = self._format_response(vision_result, rag_results)
+        if self._llm is not None:
+            response_text = await self._generate_llm_response(
+                vision_result, rag_results
+            )
+        else:
+            response_text = self._format_response(vision_result, rag_results)
 
         return ImageAnalysisResult(
             vision=vision_result,
@@ -88,6 +100,46 @@ class ImagePipeline:
             query_text=query,
             response_text=response_text,
         )
+
+    async def _generate_llm_response(
+        self,
+        vision: VisionResult,
+        rag_results: list[RetrievalResult],
+    ) -> str:
+        """Generate response via LLM with validation fallback."""
+        symptoms_text = "، ".join(vision.symptoms) if vision.symptoms else "none"
+        prompt = (
+            f"Based on crop image analysis:\n"
+            f"Crop: {vision.crop}\n"
+            f"Condition: {vision.condition}\n"
+            f"Symptoms: {symptoms_text}\n\n"
+            f"Provide agricultural advice for the farmer in simple Urdu."
+        )
+
+        rag_texts = [r.text for r in rag_results]
+        rag_sources = [r.document_id for r in rag_results]
+        context = "\n\n".join(rag_texts)
+
+        try:
+            response_text = await self._llm.generate(prompt, context=context)
+        except Exception as e:
+            logger.warning("ImagePipeline: LLM generation failed, falling back to template: %s", e)
+            return self._format_response(vision, rag_results)
+
+        report = self._validator.validate(
+            response_text,
+            rag_sources=rag_sources or None,
+            vision_confidence=vision.confidence,
+            rag_texts=rag_texts or None,
+        )
+
+        if report.has_ungrounded_treatment:
+            logger.warning("ImagePipeline: ungrounded treatment detected, falling back to template")
+            return self._format_response(vision, rag_results)
+        elif report.disclaimer:
+            response_text = f"{response_text}\n\n{report.disclaimer}"
+
+        return response_text
 
     def _build_query(self, result: VisionResult) -> str:
         """Convert VisionResult into a natural-language retrieval query."""
@@ -103,10 +155,7 @@ class ImagePipeline:
         vision: VisionResult,
         rag_results: list[RetrievalResult],
     ) -> str:
-        """Build an Urdu response from vision + RAG context.
-
-        Phase 3: template-based. Phase 4 will replace this with LLM generation.
-        """
+        """Build a template-based Urdu response from vision + RAG context."""
         symptoms_text = (
             "، ".join(vision.symptoms) if vision.symptoms else "کوئی واضح علامات نہیں"
         )
