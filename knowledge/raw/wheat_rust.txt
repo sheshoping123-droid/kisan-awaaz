@@ -1,0 +1,20 @@
+Wheat Rust Disease Management
+
+Wheat rust is one of the most destructive diseases affecting wheat crops in Pakistan.
+There are three main types: yellow rust (stripe rust), brown rust (leaf rust), and black rust (stem rust).
+
+Symptoms:
+Yellow rust appears as yellow-orange pustules in stripes along the leaf.
+Brown rust shows as small, circular, orange-brown pustules scattered on leaves.
+Black rust produces dark reddish-brown pustules on stems and leaf sheaths.
+
+Management:
+Plant resistant varieties such as Faisalabad-2008, Galaxy-2013, or Pakistan-2013.
+Apply fungicide sprays (propiconazole or tebuconazole) at the first sign of disease.
+Remove crop residue after harvest to reduce inoculum carryover.
+Monitor fields regularly during cool, humid weather when rust spreads fastest.
+
+Prevention:
+Use certified seed from approved sources.
+Avoid late sowing, as late-planted wheat is more vulnerable.
+Maintain balanced fertilizer application — excess nitrogen increases susceptibility.
