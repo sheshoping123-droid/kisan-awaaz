@@ -51,6 +51,23 @@ INSERT INTO conversations (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
+LIST_CONVERSATIONS_SQL = """
+SELECT id, farmer_phone, message_in, media_type, media_url,
+       vision_result, rag_sources, response_out, confidence_flag,
+       created_at, responded_at
+FROM conversations
+ORDER BY created_at DESC
+LIMIT ? OFFSET ?
+"""
+
+GET_CONVERSATION_SQL = """
+SELECT id, farmer_phone, message_in, media_type, media_url,
+       vision_result, rag_sources, response_out, confidence_flag,
+       created_at, responded_at
+FROM conversations
+WHERE id = ?
+"""
+
 
 def database_path(database_url: str) -> Path:
     """Extract the filesystem path from a sqlite:/// URL."""
@@ -100,6 +117,39 @@ class ConversationStore:
             conn.commit()
         finally:
             conn.close()
+
+    def list_conversations(self, limit: int = 50, offset: int = 0) -> list[Conversation]:
+        """Most recent conversations first (created_at descending)."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(LIST_CONVERSATIONS_SQL, (limit, offset)).fetchall()
+        finally:
+            conn.close()
+        return [self._row_to_conversation(row) for row in rows]
+
+    def get_conversation(self, conversation_id: str) -> Conversation | None:
+        conn = self._connect()
+        try:
+            row = conn.execute(GET_CONVERSATION_SQL, (conversation_id,)).fetchone()
+        finally:
+            conn.close()
+        return self._row_to_conversation(row) if row is not None else None
+
+    @staticmethod
+    def _row_to_conversation(row) -> Conversation:
+        return Conversation(
+            id=row[0],
+            farmer_phone=row[1],
+            message_in=row[2],
+            media_type=row[3],
+            media_url=row[4],
+            vision_result=row[5],
+            rag_sources=row[6],
+            response_out=row[7],
+            confidence_flag=row[8],
+            created_at=row[9],
+            responded_at=row[10],
+        )
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self._path)

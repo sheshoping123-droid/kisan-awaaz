@@ -7,6 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.adapters.whatsapp.webhook import parse_incoming_message, validate_twilio_signature
+from app.admin import admin_router
 from app.core.config import settings
 from app.core.logging import setup_logging, get_logger
 from app.core.errors import (
@@ -146,6 +147,7 @@ app = FastAPI(
 
 app.add_exception_handler(KisanAwaazError, kisanaawaaz_error_handler)  # type: ignore[arg-type]
 app.add_exception_handler(Exception, unhandled_error_handler)  # type: ignore[arg-type]
+app.include_router(admin_router)
 
 
 @app.get("/health")
