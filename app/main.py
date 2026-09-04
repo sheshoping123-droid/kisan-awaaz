@@ -1,6 +1,11 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from pathlib import Path
+from urllib.parse import parse_qsl
 
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+
+from app.adapters.whatsapp.webhook import parse_incoming_message, validate_twilio_signature
 from app.core.config import settings
 from app.core.logging import setup_logging, get_logger
 from app.core.errors import (
@@ -12,10 +17,116 @@ from app.core.errors import (
 logger = get_logger(__name__)
 
 
+def _build_router_and_whatsapp():
+    """Wire Phase 1-5 adapters and pipelines into the MessageRouter.
+
+    Heavy imports stay inside this function so importing app.main stays light.
+    Each pipeline is only built when its credentials/artifacts are available;
+    the router degrades gracefully to Urdu placeholders otherwise.
+    """
+    from app.adapters.llm.qwen_adapter import QwenLLMAdapter
+    from app.adapters.speech.whisper_adapter import WhisperAdapter
+    from app.adapters.vision.qwen_adapter import QwenVisionAdapter
+    from app.adapters.whatsapp.twilio_adapter import TwilioAdapter
+    from app.pipelines.image_pipeline import ImagePipeline
+    from app.pipelines.response_validator import ResponseValidator
+    from app.pipelines.text_pipeline import TextPipeline
+    from app.pipelines.voice_pipeline import VoicePipeline
+    from app.router import MessageRouter
+
+    whatsapp = TwilioAdapter(
+        account_sid=settings.twilio_account_sid,
+        auth_token=settings.twilio_auth_token,
+        whatsapp_number=settings.twilio_whatsapp_number,
+    )
+
+    rag_retrieve = None
+    if Path(settings.faiss_index_path).exists() and Path(settings.metadata_path).exists():
+        try:
+            from app.rag.embeddings import SentenceTransformerEmbeddings
+            from app.rag.service import RAGService
+
+            rag_service = RAGService(
+                raw_dir=settings.rag_raw_dir,
+                processed_dir=settings.rag_processed_dir,
+                embedding_provider=SentenceTransformerEmbeddings(settings.embedding_model),
+                chunk_size=settings.rag_chunk_size,
+                chunk_overlap=settings.rag_chunk_overlap,
+            )
+            rag_service.load_index()
+            rag_retrieve = rag_service.retrieve
+            logger.info("Router wiring: RAG retrieval enabled")
+        except Exception as e:
+            logger.warning("RAG index unavailable, continuing without RAG: %s", e)
+    else:
+        logger.info("No FAISS index at %s; pipelines run without RAG", settings.faiss_index_path)
+
+    validator = ResponseValidator()
+
+    llm_adapter = None
+    if settings.dashscope_api_key:
+        llm_adapter = QwenLLMAdapter(
+            api_key=settings.dashscope_api_key,
+            model=settings.llm_model,
+            timeout=settings.llm_timeout,
+        )
+
+    text_pipeline = None
+    if llm_adapter is not None:
+        text_pipeline = TextPipeline(
+            llm_adapter=llm_adapter,
+            rag_retrieve=rag_retrieve,
+            validator=validator,
+            rag_top_k=settings.rag_top_k,
+        )
+        logger.info("Router wiring: text pipeline enabled")
+
+    image_pipeline = None
+    if settings.dashscope_api_key:
+        image_pipeline = ImagePipeline(
+            vision_adapter=QwenVisionAdapter(
+                api_key=settings.dashscope_api_key,
+                model=settings.vision_model,
+                timeout=settings.vision_timeout,
+            ),
+            rag_retrieve=rag_retrieve,
+            llm_adapter=llm_adapter,
+            validator=validator,
+            max_image_bytes=settings.vision_max_image_bytes,
+            rag_top_k=settings.rag_top_k,
+        )
+        logger.info("Router wiring: image pipeline enabled")
+
+    voice_pipeline = None
+    if settings.openai_api_key and text_pipeline is not None:
+        voice_pipeline = VoicePipeline(
+            speech_adapter=WhisperAdapter(
+                api_key=settings.openai_api_key,
+                model=settings.whisper_model,
+                timeout=settings.speech_timeout,
+                max_audio_bytes=settings.speech_max_audio_bytes,
+            ),
+            text_pipeline=text_pipeline,
+            max_audio_bytes=settings.speech_max_audio_bytes,
+        )
+        logger.info("Router wiring: voice pipeline enabled")
+
+    router = MessageRouter(
+        image_pipeline=image_pipeline,
+        whatsapp_adapter=whatsapp,
+        text_pipeline=text_pipeline,
+        voice_pipeline=voice_pipeline,
+    )
+    return router, whatsapp
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
     logger.info("Kisan Awaaz starting up | env=%s | log_level=%s", settings.app_env, settings.log_level)
+    router, whatsapp = _build_router_and_whatsapp()
+    app.state.router = router
+    app.state.whatsapp = whatsapp
     yield
     logger.info("Kisan Awaaz shutting down")
 
@@ -39,3 +150,33 @@ async def health():
         "version": app.version,
         "env": settings.app_env,
     }
+
+
+@app.post("/webhook/whatsapp")
+async def whatsapp_webhook(request: Request):
+    """Twilio incoming WhatsApp webhook: validate signature -> parse -> route -> reply."""
+    # Twilio posts application/x-www-form-urlencoded; parsed with the stdlib
+    # because starlette's request.form() requires python-multipart.
+    raw_body = await request.body()
+    form = dict(parse_qsl(raw_body.decode("utf-8"), keep_blank_values=True))
+
+    auth_token = settings.twilio_auth_token
+    signature = request.headers.get("X-Twilio-Signature", "")
+    if auth_token:
+        if not validate_twilio_signature(str(request.url), form, signature, auth_token):
+            logger.warning("Webhook: rejected request with invalid Twilio signature")
+            return JSONResponse(status_code=403, content={"error": "Invalid Twilio signature"})
+    else:
+        logger.warning("Webhook: TWILIO_AUTH_TOKEN not set; skipping signature validation")
+
+    message = parse_incoming_message(form)
+
+    router = getattr(request.app.state, "router", None)
+    whatsapp = getattr(request.app.state, "whatsapp", None)
+    if router is None or whatsapp is None:
+        logger.error("Webhook: router not wired (lifespan did not run)")
+        return JSONResponse(status_code=503, content={"error": "Service not ready"})
+
+    reply = await router.route(message)
+    await whatsapp.send_text(message.from_number, reply)
+    return {"status": "ok"}
