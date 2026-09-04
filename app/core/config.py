@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # Speech
     speech_provider: str = Field(default="whisper_api")
     openai_api_key: str = Field(default="")
+    whisper_model: str = Field(default="whisper-1")
+    speech_max_audio_bytes: int = Field(default=25 * 1024 * 1024)
+    speech_timeout: int = Field(default=60)
 
     # RAG
     embedding_model: str = Field(default="paraphrase-multilingual-MiniLM-L12-v2")

@@ -166,3 +166,77 @@ async def test_text_routing_pipeline_error_returns_graceful_message():
     )
     response = await router.route(msg)
     assert "معذرت" in response
+
+
+# --- Phase 5: wired voice pipeline tests ---
+
+OGG_BYTES = b"OggS" + b"\x00" * 100
+
+
+class FakeVoiceWhatsAppAdapter(WhatsAppAdapter):
+    async def send_text(self, to: str, body: str) -> None:
+        pass
+
+    async def send_audio(self, to: str, audio_url: str) -> None:
+        pass
+
+    async def download_media(self, media_url: str) -> bytes:
+        return OGG_BYTES
+
+
+class FakeVoicePipeline:
+    async def process(self, audio_bytes: bytes) -> str:
+        return "صوتی پیغام کا تجزیہ مکمل ہوا: گندم کی زنگ کا علاج۔"
+
+
+class FailingVoicePipeline:
+    async def process(self, audio_bytes: bytes) -> str:
+        raise RuntimeError("voice pipeline failure")
+
+
+@pytest.fixture
+def voice_wired_router():
+    return MessageRouter(
+        voice_pipeline=FakeVoicePipeline(),
+        whatsapp_adapter=FakeVoiceWhatsAppAdapter(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_voice_routing_with_pipeline(voice_wired_router):
+    msg = WhatsAppMessage(
+        from_number="+923001234567",
+        body="",
+        media_type="audio",
+        media_url="https://example.com/voice.ogg",
+    )
+    response = await voice_wired_router.route(msg)
+    assert "گندم" in response
+
+
+@pytest.mark.asyncio
+async def test_voice_routing_no_media_url(voice_wired_router):
+    msg = WhatsAppMessage(
+        from_number="+923001234567",
+        body="",
+        media_type="audio",
+        media_url=None,
+    )
+    response = await voice_wired_router.route(msg)
+    assert "براہ کرم" in response
+
+
+@pytest.mark.asyncio
+async def test_voice_routing_pipeline_error_returns_graceful_message():
+    router = MessageRouter(
+        voice_pipeline=FailingVoicePipeline(),
+        whatsapp_adapter=FakeVoiceWhatsAppAdapter(),
+    )
+    msg = WhatsAppMessage(
+        from_number="+923001234567",
+        body="",
+        media_type="audio",
+        media_url="https://example.com/voice.ogg",
+    )
+    response = await router.route(msg)
+    assert "معذرت" in response

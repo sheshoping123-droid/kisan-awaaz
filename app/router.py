@@ -4,6 +4,7 @@ from app.adapters.whatsapp.base import WhatsAppAdapter, WhatsAppMessage
 from app.core.logging import get_logger
 from app.pipelines.image_pipeline import ImagePipeline
 from app.pipelines.text_pipeline import TextPipeline
+from app.pipelines.voice_pipeline import VoicePipeline
 
 logger = get_logger(__name__)
 
@@ -20,10 +21,12 @@ class MessageRouter:
         image_pipeline: ImagePipeline | None = None,
         whatsapp_adapter: WhatsAppAdapter | None = None,
         text_pipeline: TextPipeline | None = None,
+        voice_pipeline: VoicePipeline | None = None,
     ):
         self._image_pipeline = image_pipeline
         self._whatsapp = whatsapp_adapter
         self._text_pipeline = text_pipeline
+        self._voice_pipeline = voice_pipeline
 
     async def route(self, message: WhatsAppMessage) -> str:
         logger.info(
@@ -57,9 +60,19 @@ class MessageRouter:
             return "معذرت، تصویر کا تجزیہ نہیں ہو سکا۔ براہ کرم دوبارہ کوشش کریں۔"
 
     async def _handle_voice(self, message: WhatsAppMessage) -> str:
-        # Phase 5: VoicePipeline + TextPipeline
-        logger.info("MessageRouter: voice handling not yet implemented")
-        return "صوتی پیغامات کا جواب ابھی دستیاب نہیں ہے۔"
+        if self._voice_pipeline is None or self._whatsapp is None:
+            logger.info("MessageRouter: voice pipeline not configured")
+            return "صوتی پیغامات کا جواب ابھی دستیاب نہیں ہے۔"
+
+        if not message.media_url:
+            return "براہ کرم صوتی پیغام دوبارہ بھیجیں۔"
+
+        try:
+            audio_bytes = await self._whatsapp.download_media(message.media_url)
+            return await self._voice_pipeline.process(audio_bytes)
+        except Exception as e:
+            logger.error("MessageRouter: voice processing failed: %s", e)
+            return "معذرت، صوتی پیغام کا جواب نہیں دیا جا سکا۔ براہ کرم دوبارہ کوشش کریں۔"
 
     async def _handle_text(self, message: WhatsAppMessage) -> str:
         if self._text_pipeline is None:

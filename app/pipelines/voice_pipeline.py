@@ -1,24 +1,60 @@
+"""Voice pipeline: validate -> transcribe -> delegate to TextPipeline."""
+
+from __future__ import annotations
+
+from app.adapters.speech.audio_validator import validate_audio
 from app.adapters.speech.base import SpeechAdapter
-from app.core.logging import get_logger
 from app.core.errors import PipelineError
+from app.core.logging import get_logger
+from app.pipelines.text_pipeline import TextPipeline
 
 logger = get_logger(__name__)
 
 
 class VoicePipeline:
-    """Converts voice notes to text via speech-to-text.
+    """Processes voice notes through speech transcription and the text pipeline.
 
-    Phase 1 placeholder — real implementation in Phase 5.
+    Flow: validate bytes -> transcribe (Whisper) -> TextPipeline (RAG -> LLM -> validate)
     """
 
-    def __init__(self, speech_adapter: SpeechAdapter):
-        self.speech = speech_adapter
+    def __init__(
+        self,
+        speech_adapter: SpeechAdapter,
+        text_pipeline: TextPipeline,
+        max_audio_bytes: int = 25 * 1024 * 1024,
+        language: str = "ur",
+    ):
+        self._speech = speech_adapter
+        self._text_pipeline = text_pipeline
+        self._max_audio_bytes = max_audio_bytes
+        self._language = language
 
-    async def process(self, audio_bytes: bytes, language: str = "ur") -> str:
-        logger.info("VoicePipeline: transcribing audio (%d bytes), lang=%s", len(audio_bytes), language)
+    async def process(self, audio_bytes: bytes) -> str:
+        """Run the full voice pipeline."""
+        fmt = validate_audio(audio_bytes, max_bytes=self._max_audio_bytes)
+        logger.info(
+            "VoicePipeline: validated audio format=%s, size=%d bytes",
+            fmt,
+            len(audio_bytes),
+        )
+
         try:
-            transcript = await self.speech.transcribe(audio_bytes, language=language)
-            logger.info("VoicePipeline: transcript length=%d chars", len(transcript))
-            return transcript
+            transcription = await self._speech.transcribe(
+                audio_bytes, language=self._language
+            )
+        except PipelineError:
+            raise
         except Exception as e:
-            raise PipelineError("VoicePipeline", f"Transcription failed: {e}") from e
+            raise PipelineError(
+                "VoicePipeline", f"Speech transcription failed: {e}"
+            ) from e
+
+        logger.info(
+            "VoicePipeline: transcription complete (%d chars)",
+            len(transcription),
+        )
+
+        if not transcription or not transcription.strip():
+            raise PipelineError("VoicePipeline", "Transcription is empty")
+
+        return await self._text_pipeline.process(transcription)
