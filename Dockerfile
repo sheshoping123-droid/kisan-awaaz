@@ -1,1 +1,31 @@
- FROM python:3.11-slim ENV PYTHONDONTWRITEBYTECODE=1 \ PYTHONUNBUFFERED=1 \ PIP_NO_CACHE_DIR=1 RUN apt-get update \ && apt-get install -y --no-install-recommends ffmpeg \ && rm -rf /var/lib/apt/lists/* WORKDIR /app COPY requirements.txt . RUN pip install --no-cache-dir -r requirements.txt COPY app/ app/ COPY scripts/ scripts/ COPY knowledge/raw/ knowledge/raw/ # RAG index build disabled for now: baking in the ~500MB sentence-transformers # embedding model exceeds Railway's free-tier 512MB RAM limit and causes an # OOM crash loop on startup. The app degrades gracefully without a FAISS # index (see app/main.py _build_router_and_whatsapp) -- LLM/vision/voice # pipelines still work fully since they call remote APIs, not local models. # To re-enable: uncomment the line below once running on a plan with more RAM, # or after swapping to a lighter (e.g. ONNX/fastembed-based) embedding model. # RUN python scripts/build_index.py EXPOSE 8080 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app/ app/
+COPY scripts/ scripts/
+COPY knowledge/raw/ knowledge/raw/
+
+# RAG index build disabled for now: baking in the ~500MB sentence-transformers
+# embedding model exceeds Railway's free-tier 512MB RAM limit and causes an
+# OOM crash loop on startup. The app degrades gracefully without a FAISS
+# index (see app/main.py _build_router_and_whatsapp) -- LLM/vision/voice
+# pipelines still work fully since they call remote APIs, not local models.
+# To re-enable: uncomment the line below once running on a plan with more RAM,
+# or after swapping to a lighter (e.g. ONNX/fastembed-based) embedding model.
+# RUN python scripts/build_index.py
+
+EXPOSE 8080
+
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
