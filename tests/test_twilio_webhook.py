@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import hmac
+import sqlite3
 
 import pytest
 
@@ -14,6 +15,7 @@ from app.adapters.whatsapp.webhook import (
 from app.core.config import settings
 from app.core.errors import ValidationError
 from app.main import app
+from app.models.database import ConversationStore
 from app.router import MessageRouter
 
 TEST_TOKEN = "test-auth-token"
@@ -251,3 +253,115 @@ async def test_webhook_router_not_wired_returns_503(client, monkeypatch):
     )
 
     assert response.status_code == 503
+
+
+# --- conversation persistence ---
+
+
+@pytest.fixture
+def persisted(tmp_path):
+    db_path = tmp_path / "webhook.db"
+    store = ConversationStore(f"sqlite:///{db_path}")
+    store.init_schema()
+    app.state.router = RecordingRouter()
+    app.state.whatsapp = FakeWhatsAppAdapter()
+    app.state.conversation_store = store
+    yield store
+    for attr in ("router", "whatsapp", "conversation_store"):
+        if hasattr(app.state, attr):
+            delattr(app.state, attr)
+
+
+def fetch_rows(db_path) -> list[dict]:
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.row_factory = sqlite3.Row
+        return [dict(row) for row in conn.execute("SELECT * FROM conversations")]
+    finally:
+        conn.close()
+
+
+@pytest.mark.asyncio
+async def test_webhook_persists_text_conversation(client, persisted, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "twilio_auth_token", "")
+
+    response = await client.post(
+        "/webhook/whatsapp",
+        data={"From": "whatsapp:+923001234567", "Body": "میری گندم میں زنگ ہے"},
+    )
+
+    assert response.status_code == 200
+    rows = fetch_rows(tmp_path / "webhook.db")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["farmer_phone"] == "whatsapp:+923001234567"
+    assert row["message_in"] == "میری گندم میں زنگ ہے"
+    assert row["media_type"] == "text"
+    assert row["media_url"] is None
+    assert row["response_out"] == "یہ جواب ہے۔"
+    assert row["created_at"]
+    assert row["responded_at"]
+
+
+@pytest.mark.asyncio
+async def test_webhook_persists_image_conversation(client, persisted, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "twilio_auth_token", "")
+
+    response = await client.post(
+        "/webhook/whatsapp",
+        data={
+            "From": "whatsapp:+923001234567",
+            "NumMedia": "1",
+            "MediaUrl0": "https://api.twilio.com/media/xx",
+            "MediaContentType0": "image/jpeg",
+        },
+    )
+
+    assert response.status_code == 200
+    rows = fetch_rows(tmp_path / "webhook.db")
+    assert len(rows) == 1
+    assert rows[0]["media_type"] == "image"
+    assert rows[0]["media_url"] == "https://api.twilio.com/media/xx"
+    assert rows[0]["message_in"] is None
+
+
+@pytest.mark.asyncio
+async def test_webhook_persists_voice_conversation(client, persisted, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "twilio_auth_token", "")
+
+    response = await client.post(
+        "/webhook/whatsapp",
+        data={
+            "From": "whatsapp:+923001234567",
+            "NumMedia": "1",
+            "MediaUrl0": "https://api.twilio.com/media/yy",
+            "MediaContentType0": "audio/ogg; codecs=opus",
+        },
+    )
+
+    assert response.status_code == 200
+    rows = fetch_rows(tmp_path / "webhook.db")
+    assert len(rows) == 1
+    assert rows[0]["media_type"] == "voice"
+    assert rows[0]["media_url"] == "https://api.twilio.com/media/yy"
+
+
+class BrokenStore:
+    def save(self, conversation):
+        raise RuntimeError("database unavailable")
+
+
+@pytest.mark.asyncio
+async def test_webhook_persistence_failure_still_replies(client, wired, monkeypatch):
+    router, whatsapp = wired
+    monkeypatch.setattr(settings, "twilio_auth_token", "")
+    monkeypatch.setattr(app.state, "conversation_store", BrokenStore(), raising=False)
+
+    response = await client.post(
+        "/webhook/whatsapp",
+        data={"From": "whatsapp:+923001234567", "Body": "hello"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    assert whatsapp.sent == [("whatsapp:+923001234567", "یہ جواب ہے۔")]

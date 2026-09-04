@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qsl
 
@@ -13,6 +14,8 @@ from app.core.errors import (
     kisanaawaaz_error_handler,
     unhandled_error_handler,
 )
+from app.models.conversation import Conversation
+from app.models.database import ConversationStore
 
 logger = get_logger(__name__)
 
@@ -125,8 +128,11 @@ async def lifespan(app: FastAPI):
     setup_logging()
     logger.info("Kisan Awaaz starting up | env=%s | log_level=%s", settings.app_env, settings.log_level)
     router, whatsapp = _build_router_and_whatsapp()
+    conversation_store = ConversationStore(settings.database_url)
+    conversation_store.init_schema()
     app.state.router = router
     app.state.whatsapp = whatsapp
+    app.state.conversation_store = conversation_store
     yield
     logger.info("Kisan Awaaz shutting down")
 
@@ -150,6 +156,36 @@ async def health():
         "version": app.version,
         "env": settings.app_env,
     }
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _persist_conversation(
+    request: Request,
+    message,
+    reply: str,
+    created_at: str,
+    responded_at: str,
+) -> None:
+    store = getattr(request.app.state, "conversation_store", None)
+    if store is None:
+        logger.warning("Webhook: conversation store not wired; skipping persistence")
+        return
+    conversation = Conversation(
+        farmer_phone=message.from_number,
+        message_in=message.body or None,
+        media_type={"image": "image", "audio": "voice"}.get(message.media_type, "text"),
+        media_url=message.media_url,
+        response_out=reply,
+        created_at=created_at,
+        responded_at=responded_at,
+    )
+    try:
+        store.save(conversation)
+    except Exception as e:
+        logger.warning("Webhook: failed to persist conversation: %s", e)
 
 
 @app.post("/webhook/whatsapp")
@@ -177,6 +213,9 @@ async def whatsapp_webhook(request: Request):
         logger.error("Webhook: router not wired (lifespan did not run)")
         return JSONResponse(status_code=503, content={"error": "Service not ready"})
 
+    created_at = _utc_now_iso()
     reply = await router.route(message)
+    responded_at = _utc_now_iso()
     await whatsapp.send_text(message.from_number, reply)
+    _persist_conversation(request, message, reply, created_at, responded_at)
     return {"status": "ok"}
