@@ -10,7 +10,7 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+DASHSCOPE_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are Kisan Awaaz, an agricultural advisor helping Pakistani farmers. "
