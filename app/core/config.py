@@ -12,6 +12,22 @@ class Settings(BaseSettings):
     twilio_whatsapp_number: str = Field(default="")
     webhook_base_url: str = Field(default="http://localhost:8000")
 
+    # WhatsApp (Meta Cloud API) -- used instead of Twilio when these are set.
+    # META_ACCESS_TOKEN: temporary (24h) or permanent system-user token from
+    #   the app's WhatsApp > API Setup page.
+    # META_PHONE_NUMBER_ID: the numeric Phone Number ID shown on that same page
+    #   (NOT the phone number itself).
+    # META_APP_SECRET: from the app's Settings > Basic page; used to verify
+    #   the X-Hub-Signature-256 header on incoming webhooks.
+    # META_VERIFY_TOKEN: any string you choose yourself; you enter the same
+    #   value in Meta's webhook configuration screen so Meta can verify the
+    #   webhook URL belongs to you (GET hub.challenge handshake).
+    meta_access_token: str = Field(default="")
+    meta_phone_number_id: str = Field(default="")
+    meta_app_secret: str = Field(default="")
+    meta_verify_token: str = Field(default="")
+    meta_api_version: str = Field(default="v21.0")
+
     # Vision
     vision_provider: str = Field(default="qwen_api")
     dashscope_api_key: str = Field(default="")
