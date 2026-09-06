@@ -31,6 +31,7 @@ def _build_router_and_whatsapp():
     from app.adapters.llm.qwen_adapter import QwenLLMAdapter
     from app.adapters.speech.whisper_adapter import WhisperAdapter
     from app.adapters.vision.qwen_adapter import QwenVisionAdapter
+    from app.adapters.whatsapp.meta_adapter import MetaWhatsAppAdapter
     from app.adapters.whatsapp.twilio_adapter import TwilioAdapter
     from app.pipelines.image_pipeline import ImagePipeline
     from app.pipelines.response_validator import ResponseValidator
@@ -38,11 +39,22 @@ def _build_router_and_whatsapp():
     from app.pipelines.voice_pipeline import VoicePipeline
     from app.router import MessageRouter
 
-    whatsapp = TwilioAdapter(
-        account_sid=settings.twilio_account_sid,
-        auth_token=settings.twilio_auth_token,
-        whatsapp_number=settings.twilio_whatsapp_number,
-    )
+    # Prefer Meta's WhatsApp Cloud API when configured (free, no region
+    # restrictions); fall back to Twilio otherwise.
+    if settings.meta_access_token and settings.meta_phone_number_id:
+        whatsapp = MetaWhatsAppAdapter(
+            access_token=settings.meta_access_token,
+            phone_number_id=settings.meta_phone_number_id,
+            api_version=settings.meta_api_version,
+        )
+        logger.info("Router wiring: using Meta WhatsApp Cloud API adapter")
+    else:
+        whatsapp = TwilioAdapter(
+            account_sid=settings.twilio_account_sid,
+            auth_token=settings.twilio_auth_token,
+            whatsapp_number=settings.twilio_whatsapp_number,
+        )
+        logger.info("Router wiring: using Twilio WhatsApp adapter")
 
     rag_retrieve = None
     if Path(settings.faiss_index_path).exists() and Path(settings.metadata_path).exists():
@@ -190,6 +202,22 @@ def _persist_conversation(
         logger.warning("Webhook: failed to persist conversation: %s", e)
 
 
+async def _process_and_reply(request: Request, message) -> JSONResponse | dict:
+    """Shared pipeline: route an already-parsed WhatsAppMessage, reply, persist."""
+    router = getattr(request.app.state, "router", None)
+    whatsapp = getattr(request.app.state, "whatsapp", None)
+    if router is None or whatsapp is None:
+        logger.error("Webhook: router not wired (lifespan did not run)")
+        return JSONResponse(status_code=503, content={"error": "Service not ready"})
+
+    created_at = _utc_now_iso()
+    reply = await router.route(message)
+    responded_at = _utc_now_iso()
+    await whatsapp.send_text(message.from_number, reply)
+    _persist_conversation(request, message, reply, created_at, responded_at)
+    return {"status": "ok"}
+
+
 @app.post("/webhook/whatsapp")
 async def whatsapp_webhook(request: Request):
     """Twilio incoming WhatsApp webhook: validate signature -> parse -> route -> reply."""
@@ -208,16 +236,51 @@ async def whatsapp_webhook(request: Request):
         logger.warning("Webhook: TWILIO_AUTH_TOKEN not set; skipping signature validation")
 
     message = parse_incoming_message(form)
+    return await _process_and_reply(request, message)
 
-    router = getattr(request.app.state, "router", None)
-    whatsapp = getattr(request.app.state, "whatsapp", None)
-    if router is None or whatsapp is None:
-        logger.error("Webhook: router not wired (lifespan did not run)")
-        return JSONResponse(status_code=503, content={"error": "Service not ready"})
 
-    created_at = _utc_now_iso()
-    reply = await router.route(message)
-    responded_at = _utc_now_iso()
-    await whatsapp.send_text(message.from_number, reply)
-    _persist_conversation(request, message, reply, created_at, responded_at)
-    return {"status": "ok"}
+@app.get("/webhook/whatsapp/meta")
+async def meta_webhook_verify(request: Request):
+    """Meta's one-time webhook verification handshake.
+
+    When you enter your webhook URL + verify token in the Meta app dashboard,
+    Meta sends this GET request. You must echo back hub.challenge exactly
+    (as plain text) if hub.verify_token matches your configured value.
+    """
+    from fastapi.responses import PlainTextResponse
+
+    params = request.query_params
+    mode = params.get("hub.mode")
+    token = params.get("hub.verify_token")
+    challenge = params.get("hub.challenge")
+
+    if mode == "subscribe" and token == settings.meta_verify_token and challenge:
+        logger.info("Meta webhook: verification handshake succeeded")
+        return PlainTextResponse(challenge)
+
+    logger.warning("Meta webhook: verification failed (mode=%s, token_match=%s)", mode, token == settings.meta_verify_token)
+    return JSONResponse(status_code=403, content={"error": "Verification failed"})
+
+
+@app.post("/webhook/whatsapp/meta")
+async def meta_webhook(request: Request):
+    """Meta WhatsApp Cloud API incoming webhook: validate signature -> parse -> route -> reply."""
+    from app.adapters.whatsapp.meta_webhook import parse_meta_incoming_message, validate_meta_signature
+
+    raw_body = await request.body()
+    signature = request.headers.get("X-Hub-Signature-256", "")
+
+    if settings.meta_app_secret:
+        if not validate_meta_signature(raw_body, signature, settings.meta_app_secret):
+            logger.warning("Meta webhook: rejected request with invalid signature")
+            return JSONResponse(status_code=403, content={"error": "Invalid signature"})
+    else:
+        logger.warning("Meta webhook: META_APP_SECRET not set; skipping signature validation")
+
+    payload = await request.json()
+    message = parse_meta_incoming_message(payload)
+    if message is None:
+        # Status callback (sent/delivered/read), not an actual incoming message.
+        return {"status": "ignored"}
+
+    return await _process_and_reply(request, message)
